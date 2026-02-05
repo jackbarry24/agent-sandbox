@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: sbx-prepull
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: sbx-prepull
+  template:
+    metadata:
+      labels:
+        app: sbx-prepull
+    spec:
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+      containers:
+        - name: prepull
+          image: sandbox-base:dev
+          command: ["sleep", "infinity"]
+      terminationGracePeriodSeconds: 0

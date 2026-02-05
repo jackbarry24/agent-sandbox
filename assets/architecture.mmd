@@ -1,0 +1,74 @@
+flowchart TB
+  subgraph Clients[Clients]
+    CLI[CLI sbx]
+    UI[Future UI]
+    Agent[Agent Harness]
+  end
+
+  subgraph ControlPlane[Control Plane]
+    API[HTTP API /sandboxes]
+    ExecAPI[Exec API /sandboxes/:id/exec]
+    StreamAPI[WS Stream /sandboxes/:id/stream]
+    IngestAPI[WS Ingest /sandboxes/:id/ingest]
+    StreamHub[Stream Hub In-memory buffer]
+    WarmPool[Warm Pool Manager]
+    Metrics[Metrics /metrics]
+    Config[Config Loader SANDBOX_CONFIG + env]
+    K8sClient[K8s Client]
+  end
+
+  subgraph DataPlane[Data Plane - Kubernetes]
+    RuntimeClass[RuntimeClass runc/gVisor/Kata]
+    CacheVol[Cache Volume hostpath/pvc/emptydir]
+    WarmNS[Warm Pool Namespaces]
+    subgraph SandboxNS[Sandbox Namespace]
+      Pod[Sandbox Pod]
+      App[Sandbox Container]
+      Sidecar[Stream Sidecar]
+      EventsVol[Events Volume /sbx-events]
+      WorkspaceVol[Workspace Volume /workspace]
+    end
+  end
+
+  subgraph Infra[Infrastructure]
+    Kind[Kind Cluster]
+    Node[Nodes]
+    KubeAPI[Kubernetes API]
+  end
+
+  CLI --> API
+  Agent --> ExecAPI
+  UI --> StreamAPI
+  ExecAPI --> K8sClient
+  API --> K8sClient
+  K8sClient --> KubeAPI
+
+  Config --> API
+  Config --> WarmPool
+  Config --> Metrics
+  Config --> ExecAPI
+
+  API --> WarmPool
+  WarmPool --> K8sClient
+
+  StreamAPI --> StreamHub
+  IngestAPI --> StreamHub
+  StreamHub --> StreamAPI
+
+  KubeAPI --> SandboxNS
+  KubeAPI --> WarmNS
+  KubeAPI --> RuntimeClass
+  KubeAPI --> CacheVol
+
+  Pod --> App
+  Pod --> Sidecar
+  Pod --> EventsVol
+  Pod --> WorkspaceVol
+  Pod --> CacheVol
+
+  ExecAPI --> Pod
+  App --> EventsVol
+  Sidecar --> IngestAPI
+
+  Kind --> KubeAPI
+  Node --> Kind
