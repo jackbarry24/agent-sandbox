@@ -4,6 +4,11 @@ This repo contains a minimal control plane and CLI that create a sandbox Pod on 
 
 <img src="assets/screenshot.png" alt="Screenshot" width="720" />
 
+## Basic Overview
+- Control plane is a HTTP server that manages sandboxes
+- Data plane is a Kubernetes cluster that runs the sandboxes
+- Execs are async by default; stdout/stderr is streamed over WebSocket
+
 ## Prereqs
 - Go 1.22+
 - `kubectl`
@@ -66,14 +71,6 @@ This repo contains a minimal control plane and CLI that create a sandbox Pod on 
 - `SANDBOX_STREAM_EVENTS_DIR` (default: `/sbx-events`)
 - `SANDBOX_STREAM_BUFFER` (in-memory events retained per sandbox, default: `200`)
 - `SANDBOX_USE_ASYNC_EXEC` (`1` to default exec to async; request can override)
-
-## Dev Helpers
-- `./dev/demo.sh` runs a create/exec/delete flow via the CLI.
-
-## Notes
-- PVC mode requires a default StorageClass in the cluster.
-- `exec` uses Kubernetes SPDY exec under the hood.
-- `SANDBOX_ALLOWED_HOSTS`/`SANDBOX_DISALLOWED_HOSTS` are surfaced as env vars and annotations for in-sandbox enforcement.
 
 ## Streaming Exec Output
 You can run async exec and stream output over WebSocket:
