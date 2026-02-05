@@ -1,8 +1,9 @@
-# Local Sandbox Control/Data Plane (MVP)
+# Agent Sandbox
 
 This repo contains a minimal control plane and CLI that create a sandbox Pod on a local Kubernetes cluster and allow command execution via HTTP.
 
 <img src="assets/screenshot.png" alt="Screenshot" width="720" />
+<img src="assets/demo.gif" alt="Demo" width="480" />
 
 ## Basic Overview
 - Control plane is a HTTP server that manages sandboxes
