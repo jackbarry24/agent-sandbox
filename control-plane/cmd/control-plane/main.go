@@ -84,6 +84,7 @@ func main() {
 		}
 		go s.warm.run(context.Background(), getenv("SANDBOX_IMAGE", defaultImage))
 	}
+	go s.reapIdleSandboxes(context.Background())
 
 	router := gin.New()
 	router.Use(requestIDMiddleware(), ginLogger())
