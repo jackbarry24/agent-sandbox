@@ -42,6 +42,24 @@ func (c *Client) Exec(ctx context.Context, id string, req api.ExecRequest) (*api
 	return &resp, nil
 }
 
+func (c *Client) ExecStatus(ctx context.Context, id, execID string) (*api.ExecStatusResponse, error) {
+	var resp api.ExecStatusResponse
+	path := fmt.Sprintf("/sandboxes/%s/execs/%s", id, execID)
+	if err := c.do(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *Client) CancelExec(ctx context.Context, id, execID string) (*api.ExecStatusResponse, error) {
+	var resp api.ExecStatusResponse
+	path := fmt.Sprintf("/sandboxes/%s/execs/%s/cancel", id, execID)
+	if err := c.do(ctx, http.MethodPost, path, map[string]string{}, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 func (c *Client) Delete(ctx context.Context, id string) error {
 	path := fmt.Sprintf("/sandboxes/%s", id)
 	return c.do(ctx, http.MethodDelete, path, nil, nil)

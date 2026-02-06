@@ -34,6 +34,9 @@ type Config struct {
 	StreamEventsDir      string            `yaml:"stream_events_dir"`
 	StreamBuffer         int               `yaml:"stream_buffer"`
 	AsyncExec            *bool             `yaml:"async_exec"`
+	ExecStatusRetention  string            `yaml:"exec_status_retention"`
+	ExecTimeout          string            `yaml:"exec_timeout"`
+	ExecMaxTimeout       string            `yaml:"exec_max_timeout"`
 }
 
 var (
@@ -135,6 +138,18 @@ func configString(key string) (string, bool) {
 		if cfg.StreamEventsDir != "" {
 			return cfg.StreamEventsDir, true
 		}
+	case "SANDBOX_EXEC_STATUS_RETENTION":
+		if cfg.ExecStatusRetention != "" {
+			return cfg.ExecStatusRetention, true
+		}
+	case "SANDBOX_EXEC_TIMEOUT":
+		if cfg.ExecTimeout != "" {
+			return cfg.ExecTimeout, true
+		}
+	case "SANDBOX_EXEC_MAX_TIMEOUT":
+		if cfg.ExecMaxTimeout != "" {
+			return cfg.ExecMaxTimeout, true
+		}
 	}
 	return "", false
 }
@@ -205,6 +220,24 @@ func configDuration(key string) (time.Duration, bool) {
 	case "SANDBOX_CREATE_READY_TIMEOUT":
 		if cfg.CreateReadyTimeout != "" {
 			if d, err := time.ParseDuration(cfg.CreateReadyTimeout); err == nil {
+				return d, true
+			}
+		}
+	case "SANDBOX_EXEC_STATUS_RETENTION":
+		if cfg.ExecStatusRetention != "" {
+			if d, err := time.ParseDuration(cfg.ExecStatusRetention); err == nil {
+				return d, true
+			}
+		}
+	case "SANDBOX_EXEC_TIMEOUT":
+		if cfg.ExecTimeout != "" {
+			if d, err := time.ParseDuration(cfg.ExecTimeout); err == nil {
+				return d, true
+			}
+		}
+	case "SANDBOX_EXEC_MAX_TIMEOUT":
+		if cfg.ExecMaxTimeout != "" {
+			if d, err := time.ParseDuration(cfg.ExecMaxTimeout); err == nil {
 				return d, true
 			}
 		}

@@ -74,6 +74,9 @@ This repo contains a minimal control plane and CLI that create a sandbox Pod on 
 - `SANDBOX_STREAM_EVENTS_DIR` (default: `/sbx-events`)
 - `SANDBOX_STREAM_BUFFER` (in-memory events retained per sandbox, default: `200`)
 - `SANDBOX_ASYNC_EXEC` (`1` to default exec to async; request can override)
+- `SANDBOX_EXEC_STATUS_RETENTION` (how long terminal async exec statuses are kept in memory, default: `30m`)
+- `SANDBOX_EXEC_TIMEOUT` (default per-exec timeout, disabled when unset)
+- `SANDBOX_EXEC_MAX_TIMEOUT` (max allowed request timeout, default: `6h`)
 
 ## Streaming Exec Output
 Async exec output is streamed via the sidecar over WebSocket (requires `SANDBOX_STREAM_SIDECAR_IMAGE` and `SANDBOX_STREAM_ENDPOINT`):
@@ -87,6 +90,16 @@ Async exec output is streamed via the sidecar over WebSocket (requires `SANDBOX_
 2. Stream:
    ```
    ws://localhost:8080/sandboxes/<id>/stream?exec_id=<exec_id>
+   ```
+
+3. Query status:
+   ```bash
+   curl -sS http://localhost:8080/sandboxes/<id>/execs/<exec_id>
+   ```
+
+4. Cancel:
+   ```bash
+   curl -sS -X POST http://localhost:8080/sandboxes/<id>/execs/<exec_id>/cancel
    ```
 
 Events are JSON objects with fields:

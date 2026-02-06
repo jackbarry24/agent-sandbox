@@ -1,4 +1,4 @@
-.PHONY: kind-up kind-down run control-plane cli demo image image-base image-sidecar images install-cli clean-sbx prepull
+.PHONY: kind-up kind-down run control-plane cli web-term demo image image-base image-sidecar images install-cli clean-sbx prepull
 
 ENV_FILE ?=
 CONFIG ?=
@@ -24,6 +24,9 @@ control-plane:
 
 cli:
 	go build -o bin/sbx ./cli/cmd/sbx
+
+web-term:
+	go run ./interfaces/web/cmd/webterm
 
 install-cli:
 	mkdir -p $(HOME)/bin

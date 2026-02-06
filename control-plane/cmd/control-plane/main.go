@@ -45,6 +45,7 @@ type server struct {
 	cfg    *rest.Config
 	warm   *warmPool
 	stream *streamHub
+	execs  *execRegistry
 }
 
 func main() {
@@ -70,6 +71,7 @@ func main() {
 		cfg:    cfg,
 		warm:   nil,
 		stream: newStreamHub(getenvInt("SANDBOX_STREAM_BUFFER", 200)),
+		execs:  newExecRegistry(getenvDuration("SANDBOX_EXEC_STATUS_RETENTION", 30*time.Minute)),
 	}
 	metricCacheMode.Set(getenv("SANDBOX_CACHE_MODE", defaultCacheMode))
 	metricStreamBuffer.Set(int64(getenvInt("SANDBOX_STREAM_BUFFER", 200)))
@@ -83,6 +85,7 @@ func main() {
 		go s.warm.run(context.Background(), getenv("SANDBOX_IMAGE", defaultImage))
 	}
 	go s.reapIdleSandboxes(context.Background())
+	go s.execs.start(context.Background())
 
 	router := gin.New()
 	router.Use(requestIDMiddleware(), ginLogger())
@@ -92,6 +95,8 @@ func main() {
 	router.GET("/sandboxes", s.listSandboxes)
 	router.GET("/sandboxes/:id", s.getSandbox)
 	router.POST("/sandboxes/:id/exec", s.execSandbox)
+	router.GET("/sandboxes/:id/execs/:exec_id", s.getExecStatus)
+	router.POST("/sandboxes/:id/execs/:exec_id/cancel", s.cancelExec)
 	router.GET("/sandboxes/:id/stream", s.streamSandbox)
 	router.GET("/sandboxes/:id/ingest", s.ingestSandbox)
 	router.DELETE("/sandboxes/:id", s.deleteSandbox)
@@ -226,6 +231,11 @@ func (s *server) execSandbox(c *gin.Context) {
 
 	ns := id
 	podName := "sandbox"
+	timeoutSeconds, err := resolveExecTimeoutSeconds(req.TimeoutSeconds)
+	if err != nil {
+		writeError(c, 400, err.Error())
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), defaultWaitReady)
 	defer cancel()
@@ -240,18 +250,26 @@ func (s *server) execSandbox(c *gin.Context) {
 	}
 	if useAsync {
 		execID := generateExecID()
+		execCtx, execCancel := execContext(timeoutSeconds)
+		s.execs.createRunning(ns, execID, timeoutSeconds, execCancel)
 		if streamCfg.sidecarImage != "" {
 			cmd := wrapCommandForSidecar(execID, req.Command, streamCfg.eventsDir)
-			go s.execCommandStream(context.Background(), ns, podName, "sandbox", execID, cmd)
+			go s.execCommandStream(execCtx, ns, podName, "sandbox", execID, cmd)
 		} else {
-			go s.execCommandStream(context.Background(), ns, podName, "sandbox", execID, req.Command)
+			go s.execCommandStream(execCtx, ns, podName, "sandbox", execID, req.Command)
 		}
 		metricExecs.Add(1)
 		writeJSON(c, 200, api.ExecResponse{ExecID: execID, Status: "running"})
 		return
 	}
 
-	stdout, stderr, err := s.execCommand(c.Request.Context(), ns, podName, "sandbox", req.Command)
+	execCtx := c.Request.Context()
+	execCancel := func() {}
+	if timeoutSeconds != nil {
+		execCtx, execCancel = context.WithTimeout(execCtx, time.Duration(*timeoutSeconds)*time.Second)
+	}
+	defer execCancel()
+	stdout, stderr, err := s.execCommand(execCtx, ns, podName, "sandbox", req.Command)
 	if err != nil {
 		writeError(c, 500, err.Error())
 		return
@@ -259,6 +277,40 @@ func (s *server) execSandbox(c *gin.Context) {
 	_ = s.updateLastExec(c.Request.Context(), ns)
 	metricExecs.Add(1)
 	writeJSON(c, 200, api.ExecResponse{Stdout: stdout, Stderr: stderr, Status: "completed"})
+}
+
+func (s *server) getExecStatus(c *gin.Context) {
+	id := c.Param("id")
+	execID := c.Param("exec_id")
+	status, ok := s.execs.get(id, execID)
+	if !ok {
+		writeError(c, 404, "exec not found")
+		return
+	}
+	writeJSON(c, 200, status)
+}
+
+func (s *server) cancelExec(c *gin.Context) {
+	id := c.Param("id")
+	execID := c.Param("exec_id")
+	status, found, canceled := s.execs.requestCancel(id, execID)
+	if !found {
+		writeError(c, 404, "exec not found")
+		return
+	}
+	if !canceled && isTerminalExecStatus(status.Status) {
+		writeError(c, 409, "exec is already in terminal state")
+		return
+	}
+	if !canceled && status.Status == execStatusCanceling {
+		writeError(c, 409, "exec cancel is already in progress")
+		return
+	}
+	if !canceled {
+		writeError(c, 409, "exec cannot be canceled")
+		return
+	}
+	writeJSON(c, 200, status)
 }
 
 func (s *server) deleteSandbox(c *gin.Context) {
@@ -500,6 +552,10 @@ func (s *server) execCommand(ctx context.Context, ns, pod, container string, cmd
 }
 
 func (s *server) execCommandStream(ctx context.Context, ns, pod, container, execID string, cmd []string) {
+	defer func() {
+		_ = s.updateLastExec(context.Background(), ns)
+	}()
+
 	req := s.client.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(pod).
@@ -514,6 +570,7 @@ func (s *server) execCommandStream(ctx context.Context, ns, pod, container, exec
 
 	exec, err := remotecommand.NewSPDYExecutor(s.cfg, "POST", req.URL())
 	if err != nil {
+		s.execs.finish(ns, execID, err)
 		s.stream.publish(execEvent{
 			SandboxID: ns,
 			ExecID:    execID,
@@ -531,8 +588,7 @@ func (s *server) execCommandStream(ctx context.Context, ns, pod, container, exec
 		Stdout: io.Discard,
 		Stderr: io.Discard,
 	})
-	_ = err
-	_ = s.updateLastExec(context.Background(), ns)
+	s.execs.finish(ns, execID, err)
 }
 
 func (s *server) streamSandbox(c *gin.Context) {
@@ -663,6 +719,34 @@ func getenvBool(key string, fallback bool) bool {
 		}
 	}
 	return fallback
+}
+
+func resolveExecTimeoutSeconds(requested *int) (*int, error) {
+	timeout := intPtrCopy(requested)
+	if timeout == nil {
+		if d := getenvDuration("SANDBOX_EXEC_TIMEOUT", 0); d > 0 {
+			seconds := int(d.Seconds())
+			timeout = &seconds
+		}
+	}
+	if timeout != nil && *timeout <= 0 {
+		return nil, fmt.Errorf("timeout_seconds must be > 0")
+	}
+	maxDuration := getenvDuration("SANDBOX_EXEC_MAX_TIMEOUT", 6*time.Hour)
+	if maxDuration > 0 && timeout != nil {
+		maxSeconds := int(maxDuration.Seconds())
+		if *timeout > maxSeconds {
+			return nil, fmt.Errorf("timeout_seconds must be <= %d", maxSeconds)
+		}
+	}
+	return timeout, nil
+}
+
+func execContext(timeoutSeconds *int) (context.Context, context.CancelFunc) {
+	if timeoutSeconds != nil {
+		return context.WithTimeout(context.Background(), time.Duration(*timeoutSeconds)*time.Second)
+	}
+	return context.WithCancel(context.Background())
 }
 
 func requestIDMiddleware() gin.HandlerFunc {
