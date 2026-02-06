@@ -551,10 +551,61 @@ func (s *server) execCommand(ctx context.Context, ns, pod, container string, cmd
 	return stdout.String(), stderr.String(), nil
 }
 
+type streamEventWriter struct {
+	server    *server
+	sandboxID string
+	execID    string
+	stream    string
+}
+
+func (w *streamEventWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	w.server.stream.publish(execEvent{
+		SandboxID: w.sandboxID,
+		ExecID:    w.execID,
+		Seq:       w.server.stream.nextSeq(),
+		Type:      "output",
+		Stream:    w.stream,
+		Data:      string(p),
+		Time:      nowTS(),
+	})
+	return len(p), nil
+}
+
+func (s *server) publishExecExit(sandboxID, execID string, err error) {
+	exitCode := 0
+	if err != nil {
+		exitCode = 1
+	}
+	if code, ok := exitCodeFromErr(err); ok {
+		exitCode = code
+	}
+	msg := ""
+	if status, ok := s.execs.get(sandboxID, execID); ok {
+		if status.ExitCode != nil {
+			exitCode = *status.ExitCode
+		}
+		msg = status.Error
+	}
+	s.stream.publish(execEvent{
+		SandboxID: sandboxID,
+		ExecID:    execID,
+		Seq:       s.stream.nextSeq(),
+		Type:      "exit",
+		Stream:    "stderr",
+		Data:      msg,
+		ExitCode:  exitCode,
+		Time:      nowTS(),
+	})
+}
+
 func (s *server) execCommandStream(ctx context.Context, ns, pod, container, execID string, cmd []string) {
 	defer func() {
 		_ = s.updateLastExec(context.Background(), ns)
 	}()
+	streamCfg := streamConfigFromEnv()
 
 	req := s.client.CoreV1().RESTClient().Post().
 		Resource("pods").
@@ -571,24 +622,28 @@ func (s *server) execCommandStream(ctx context.Context, ns, pod, container, exec
 	exec, err := remotecommand.NewSPDYExecutor(s.cfg, "POST", req.URL())
 	if err != nil {
 		s.execs.finish(ns, execID, err)
-		s.stream.publish(execEvent{
-			SandboxID: ns,
-			ExecID:    execID,
-			Seq:       s.stream.nextSeq(),
-			Type:      "exit",
-			Stream:    "stderr",
-			Data:      err.Error(),
-			ExitCode:  1,
-			Time:      nowTS(),
-		})
+		// If exec cannot even start, emit a terminal event so clients don't hang.
+		s.publishExecExit(ns, execID, err)
 		return
 	}
 
+	stdoutWriter := io.Discard
+	stderrWriter := io.Discard
+	if streamCfg.sidecarImage == "" {
+		stdoutWriter = &streamEventWriter{server: s, sandboxID: ns, execID: execID, stream: "stdout"}
+		stderrWriter = &streamEventWriter{server: s, sandboxID: ns, execID: execID, stream: "stderr"}
+	}
+
 	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: io.Discard,
-		Stderr: io.Discard,
+		Stdout: stdoutWriter,
+		Stderr: stderrWriter,
 	})
 	s.execs.finish(ns, execID, err)
+	// Sidecar mode publishes output/exit from event files; avoid racing a direct exit
+	// event that can close client streams before sidecar stdout arrives.
+	if streamCfg.sidecarImage == "" {
+		s.publishExecExit(ns, execID, err)
+	}
 }
 
 func (s *server) streamSandbox(c *gin.Context) {

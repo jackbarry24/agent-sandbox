@@ -32,6 +32,7 @@ type execState struct {
 	exitCode     int
 	exitSeen     bool
 	lastActivity time.Time
+	exitReadyAt  time.Time
 }
 
 func main() {
@@ -165,10 +166,19 @@ func pump(dir, sandboxID string, state map[string]*execState, conn *websocket.Co
 		if st.exitSent || !st.exitSeen {
 			continue
 		}
-		if st.lastActivity.IsZero() {
-			st.lastActivity = now
+		pending, err := hasPendingOutput(dir, execID, st)
+		if err != nil {
+			return err
 		}
-		if now.Sub(st.lastActivity) < 300*time.Millisecond {
+		if pending {
+			st.exitReadyAt = time.Time{}
+			continue
+		}
+		if st.exitReadyAt.IsZero() {
+			st.exitReadyAt = now
+			continue
+		}
+		if now.Sub(st.exitReadyAt) < 300*time.Millisecond {
 			continue
 		}
 		if err := sendEvent(conn, execEvent{
@@ -183,6 +193,32 @@ func pump(dir, sandboxID string, state map[string]*execState, conn *websocket.Co
 		st.exitSent = true
 	}
 	return nil
+}
+
+func hasPendingOutput(dir, execID string, st *execState) (bool, error) {
+	stdoutPath := filepath.Join(dir, execID+".stdout")
+	stderrPath := filepath.Join(dir, execID+".stderr")
+
+	stdoutSize, err := fileSize(stdoutPath)
+	if err != nil {
+		return false, err
+	}
+	stderrSize, err := fileSize(stderrPath)
+	if err != nil {
+		return false, err
+	}
+	return stdoutSize > st.stdoutOff || stderrSize > st.stderrOff, nil
+}
+
+func fileSize(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return info.Size(), nil
 }
 
 func sendEvent(conn *websocket.Conn, evt execEvent) error {
