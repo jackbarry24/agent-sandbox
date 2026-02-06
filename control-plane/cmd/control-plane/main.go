@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -24,7 +25,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -32,7 +32,7 @@ import (
 )
 
 const (
-	defaultImage      = "ubuntu:22.04"
+	defaultImage      = "sandbox-base:dev"
 	defaultVolumeMode = "emptydir"
 	defaultWaitReady  = 20 * time.Second
 	defaultCacheMode  = "emptydir"
@@ -45,7 +45,6 @@ type server struct {
 	cfg    *rest.Config
 	warm   *warmPool
 	stream *streamHub
-	ids    *idMap
 }
 
 func main() {
@@ -71,7 +70,6 @@ func main() {
 		cfg:    cfg,
 		warm:   nil,
 		stream: newStreamHub(getenvInt("SANDBOX_STREAM_BUFFER", 200)),
-		ids:    newIDMap(),
 	}
 	metricCacheMode.Set(getenv("SANDBOX_CACHE_MODE", defaultCacheMode))
 	metricStreamBuffer.Set(int64(getenvInt("SANDBOX_STREAM_BUFFER", 200)))
@@ -91,6 +89,7 @@ func main() {
 	router.GET("/healthz", s.handleHealth)
 	router.GET("/metrics", gin.WrapH(expvar.Handler()))
 	router.POST("/sandboxes", s.handleSandboxes)
+	router.GET("/sandboxes", s.listSandboxes)
 	router.GET("/sandboxes/:id", s.getSandbox)
 	router.POST("/sandboxes/:id/exec", s.execSandbox)
 	router.GET("/sandboxes/:id/stream", s.streamSandbox)
@@ -113,6 +112,7 @@ func (s *server) handleSandboxes(c *gin.Context) {
 		writeError(c, 400, err.Error())
 		return
 	}
+	requestedID := req.ID
 	if req.ID == "" {
 		req.ID = generateID()
 	}
@@ -143,11 +143,10 @@ func (s *server) handleSandboxes(c *gin.Context) {
 		}
 	}
 
-	externalID := req.ID
 	ns := req.ID
 	warmClaimed := false
-	if s.warm != nil && s.warm.enabled() {
-		if claimed, ok, err := s.warm.claimWarmNamespace(c.Request.Context(), externalID); err == nil && ok {
+	if requestedID == "" && s.warm != nil && s.warm.enabled() {
+		if claimed, ok, err := s.warm.claimWarmNamespace(c.Request.Context()); err == nil && ok {
 			// warm namespace already has a ready pod; reuse it
 			ns = claimed
 			warmClaimed = true
@@ -157,7 +156,7 @@ func (s *server) handleSandboxes(c *gin.Context) {
 		}
 	}
 	if !warmClaimed {
-		ns = sandboxNamespace(externalID)
+		ns = sandboxNamespace(req.ID)
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
 	defer cancel()
@@ -199,8 +198,7 @@ func (s *server) handleSandboxes(c *gin.Context) {
 		return
 	}
 
-	s.ids.Set(externalID, ns)
-	resp := api.CreateSandboxResponse{ID: externalID, Namespace: ns, PodName: podName}
+	resp := api.CreateSandboxResponse{ID: ns, Namespace: ns, PodName: podName}
 	metricCreates.Add(1)
 	if warmClaimed {
 		metricCreateWarmHit.Add(1)
@@ -226,7 +224,7 @@ func (s *server) execSandbox(c *gin.Context) {
 		return
 	}
 
-	ns := s.resolveNamespace(id)
+	ns := id
 	podName := "sandbox"
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), defaultWaitReady)
@@ -236,23 +234,16 @@ func (s *server) execSandbox(c *gin.Context) {
 		return
 	}
 	streamCfg := streamConfigFromEnv()
-	useAsync := req.Async
-	if !useAsync && getenvBool("SANDBOX_USE_ASYNC_EXEC", false) {
-		useAsync = true
+	useAsync := getenvBool("SANDBOX_ASYNC_EXEC", true)
+	if req.Async != nil {
+		useAsync = *req.Async
 	}
 	if useAsync {
 		execID := generateExecID()
-		if streamCfg.mode == "sidecar" {
+		if streamCfg.sidecarImage != "" {
 			cmd := wrapCommandForSidecar(execID, req.Command, streamCfg.eventsDir)
 			go s.execCommandStream(context.Background(), ns, podName, "sandbox", execID, cmd)
 		} else {
-			s.stream.publish(execEvent{
-				SandboxID: ns,
-				ExecID:    execID,
-				Seq:       s.stream.nextSeq(),
-				Type:      "start",
-				Time:      nowTS(),
-			})
 			go s.execCommandStream(context.Background(), ns, podName, "sandbox", execID, req.Command)
 		}
 		metricExecs.Add(1)
@@ -272,21 +263,20 @@ func (s *server) execSandbox(c *gin.Context) {
 
 func (s *server) deleteSandbox(c *gin.Context) {
 	id := c.Param("id")
-	ns := s.resolveNamespace(id)
+	ns := id
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
 	defer cancel()
 	if err := s.client.CoreV1().Namespaces().Delete(ctx, ns, metav1.DeleteOptions{}); err != nil {
 		writeError(c, 500, err.Error())
 		return
 	}
-	s.ids.Delete(id)
 	metricDeletes.Add(1)
 	writeJSON(c, 200, map[string]string{"status": "deleted"})
 }
 
 func (s *server) getSandbox(c *gin.Context) {
 	id := c.Param("id")
-	ns := s.resolveNamespace(id)
+	ns := id
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 	pod, err := s.client.CoreV1().Pods(ns).Get(ctx, "sandbox", metav1.GetOptions{})
@@ -302,37 +292,45 @@ func (s *server) getSandbox(c *gin.Context) {
 	})
 }
 
-func (s *server) resolveNamespace(id string) string {
-	if id == "" {
-		return id
-	}
-	ns := s.ids.Resolve(id)
-	if ns != id && ns != "" {
-		return ns
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+func (s *server) listSandboxes(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
-	if s.namespaceExists(ctx, id) {
-		return id
+	nsList, err := s.client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		writeError(c, 500, err.Error())
+		return
 	}
-	pref := sandboxNamespace(id)
-	if s.namespaceExists(ctx, pref) {
-		return pref
+	now := time.Now()
+	statuses := make([]api.SandboxStatus, 0, len(nsList.Items))
+	for _, ns := range nsList.Items {
+		if !strings.HasPrefix(ns.Name, "sbx-") {
+			continue
+		}
+		allocated := "true"
+		if ns.Labels != nil && ns.Labels["sbx.allocated"] != "" {
+			allocated = ns.Labels["sbx.allocated"]
+		}
+		lastExec := "-"
+		if ts := ns.Annotations["sbx.last_exec_at"]; ts != "" && ts != "0" {
+			if unix, err := strconv.ParseInt(ts, 10, 64); err == nil {
+				lastExec = time.Unix(unix, 0).UTC().Format(time.RFC3339)
+			}
+		}
+		age := now.Sub(ns.CreationTimestamp.Time)
+		if age < 0 {
+			age = 0
+		}
+		statuses = append(statuses, api.SandboxStatus{
+			ID:           ns.Name,
+			Namespace:    ns.Name,
+			Age:          formatAge(age),
+			State:        string(ns.Status.Phase),
+			Allocated:    allocated,
+			LastExecTime: lastExec,
+		})
 	}
-	selector := labels.SelectorFromSet(map[string]string{"sbx.external_id": id})
-	list, err := s.client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
-	if err == nil && len(list.Items) > 0 {
-		return list.Items[0].Name
-	}
-	return id
-}
-
-func (s *server) namespaceExists(ctx context.Context, name string) bool {
-	if name == "" {
-		return false
-	}
-	_, err := s.client.CoreV1().Namespaces().Get(ctx, name, metav1.GetOptions{})
-	return err == nil
+	sort.Slice(statuses, func(i, j int) bool { return statuses[i].ID < statuses[j].ID })
+	writeJSON(c, 200, statuses)
 }
 
 func (s *server) ensureNamespace(ctx context.Context, name string, labels, annotations map[string]string) error {
@@ -529,50 +527,17 @@ func (s *server) execCommandStream(ctx context.Context, ns, pod, container, exec
 		return
 	}
 
-	stdout := &streamWriter{
-		server:  s,
-		sandbox: ns,
-		execID:  execID,
-		stream:  "stdout",
-	}
-	stderr := &streamWriter{
-		server:  s,
-		sandbox: ns,
-		execID:  execID,
-		stream:  "stderr",
-	}
-	streamMode := streamConfigFromEnv().mode
-	if streamMode == "sidecar" {
-		err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
-			Stdout: io.Discard,
-			Stderr: io.Discard,
-		})
-	} else {
-		err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
-			Stdout: stdout,
-			Stderr: stderr,
-		})
-	}
-	exitCode := 0
-	if err != nil {
-		exitCode = 1
-	}
+	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	_ = err
 	_ = s.updateLastExec(context.Background(), ns)
-	if streamConfigFromEnv().mode != "sidecar" {
-		s.stream.publish(execEvent{
-			SandboxID: ns,
-			ExecID:    execID,
-			Seq:       s.stream.nextSeq(),
-			Type:      "exit",
-			ExitCode:  exitCode,
-			Time:      nowTS(),
-		})
-	}
 }
 
 func (s *server) streamSandbox(c *gin.Context) {
 	id := c.Param("id")
-	ns := s.resolveNamespace(id)
+	ns := id
 	execID := c.Query("exec_id")
 	conn, err := wsUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
@@ -610,7 +575,7 @@ func (s *server) streamSandbox(c *gin.Context) {
 
 func (s *server) ingestSandbox(c *gin.Context) {
 	id := c.Param("id")
-	ns := s.ids.Resolve(id)
+	ns := id
 	conn, err := wsUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		return
@@ -732,13 +697,33 @@ func fmtRequestID() string {
 func generateID() string {
 	b := make([]byte, 6)
 	_, _ = rand.Read(b)
-	return "sbx-" + hex.EncodeToString(b)
+	return hex.EncodeToString(b)
 }
 
 func generateExecID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+func formatAge(d time.Duration) string {
+	if d < time.Second {
+		return "0s"
+	}
+	secs := int(d.Seconds())
+	if secs < 60 {
+		return fmt.Sprintf("%ds", secs)
+	}
+	mins := secs / 60
+	if mins < 60 {
+		return fmt.Sprintf("%dm", mins)
+	}
+	hrs := mins / 60
+	if hrs < 24 {
+		return fmt.Sprintf("%dh", hrs)
+	}
+	days := hrs / 24
+	return fmt.Sprintf("%dd", days)
 }
 
 func shellQuote(arg string) string {
@@ -781,29 +766,6 @@ func wrapCommandForSidecar(execID string, cmd []string, eventsDir string) []stri
 		execID,
 	)
 	return []string{"bash", "-lc", script}
-}
-
-type streamWriter struct {
-	server  *server
-	sandbox string
-	execID  string
-	stream  string
-}
-
-func (w *streamWriter) Write(p []byte) (int, error) {
-	if len(p) == 0 {
-		return 0, nil
-	}
-	w.server.stream.publish(execEvent{
-		SandboxID: w.sandbox,
-		ExecID:    w.execID,
-		Seq:       w.server.stream.nextSeq(),
-		Type:      "output",
-		Stream:    w.stream,
-		Data:      string(p),
-		Time:      nowTS(),
-	})
-	return len(p), nil
 }
 
 func sandboxResources() corev1.ResourceRequirements {

@@ -38,11 +38,8 @@ func (s *server) reapOnce(ctx context.Context) {
 		if !strings.HasPrefix(name, "sbx-") {
 			continue
 		}
-		if name == getenv("SANDBOX_WARM_CONTROL_NAMESPACE", defaultWarmControlNamespace) {
-			continue
-		}
 		labels := ns.Labels
-		if labels != nil && labels["sbx.pool"] == "warm" && labels["sbx.state"] == "ready" {
+		if labels != nil && labels["sbx.allocated"] == "false" {
 			continue
 		}
 		last := ns.Annotations["sbx.last_exec_at"]

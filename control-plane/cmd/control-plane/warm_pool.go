@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"sort"
 	"strconv"
 	"sync"
@@ -15,9 +14,8 @@ import (
 )
 
 const (
-	defaultWarmControlNamespace = "sbx-warm-control"
-	warmWindow                  = 60 * time.Second
-	defaultIdleTTL              = 15 * time.Minute
+	warmWindow     = 60 * time.Second
+	defaultIdleTTL = 15 * time.Minute
 )
 
 type warmPoolConfig struct {
@@ -29,13 +27,12 @@ type warmPoolConfig struct {
 }
 
 type warmPool struct {
-	client    *kubernetes.Clientset
-	cfg       warmPoolConfig
-	cache     cacheConfig
-	controlNS string
-	mu        sync.Mutex
-	next      int
-	recent    []time.Time
+	client *kubernetes.Clientset
+	cfg    warmPoolConfig
+	cache  cacheConfig
+	mu     sync.Mutex
+	next   int
+	recent []time.Time
 }
 
 func warmPoolConfigFromEnv() warmPoolConfig {
@@ -54,10 +51,9 @@ func warmPoolConfigFromEnv() warmPoolConfig {
 
 func newWarmPool(client *kubernetes.Clientset, cfg warmPoolConfig, cacheCfg cacheConfig) *warmPool {
 	return &warmPool{
-		client:    client,
-		cfg:       cfg,
-		cache:     cacheCfg,
-		controlNS: getenv("SANDBOX_WARM_CONTROL_NAMESPACE", defaultWarmControlNamespace),
+		client: client,
+		cfg:    cfg,
+		cache:  cacheCfg,
 	}
 }
 
@@ -69,13 +65,6 @@ func (w *warmPool) enabled() bool {
 		return w.cfg.max > 0 || w.cfg.min > 0
 	}
 	return w.cfg.size > 0
-}
-
-func (w *warmPool) allocateID() string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.next++
-	return fmt.Sprintf("warm-%d", w.next)
 }
 
 func (w *warmPool) recordCreate() {
@@ -124,7 +113,6 @@ func (w *warmPool) pruneLocked(now time.Time) {
 func (w *warmPool) run(ctx context.Context, image string) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	_ = w.ensureNamespace(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -140,7 +128,6 @@ func (w *warmPool) rebuildFromCluster(ctx context.Context, image string) error {
 	if w == nil {
 		return nil
 	}
-	_ = w.ensureNamespace(ctx)
 	if err := w.ensureWarmNamespaces(ctx, image); err != nil {
 		return err
 	}
@@ -172,22 +159,10 @@ func (w *warmPool) rebuildFromCluster(ctx context.Context, image string) error {
 	return nil
 }
 
-func (w *warmPool) ensureNamespace(ctx context.Context) error {
-	_, err := w.client.CoreV1().Namespaces().Get(ctx, w.controlNS, metav1.GetOptions{})
-	if err == nil {
-		return nil
-	}
-	_, err = w.client.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{Name: w.controlNS},
-	}, metav1.CreateOptions{})
-	return err
-}
-
 // claimWarmNamespace finds an unclaimed warm namespace, marks it with session labels, and returns it.
-func (w *warmPool) claimWarmNamespace(ctx context.Context, externalID string) (string, bool, error) {
+func (w *warmPool) claimWarmNamespace(ctx context.Context) (string, bool, error) {
 	selector := labels.SelectorFromSet(map[string]string{
-		"sbx.pool":  "warm",
-		"sbx.state": "ready",
+		"sbx.allocated": "false",
 	})
 	nsList, err := w.client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
 	if err != nil {
@@ -208,10 +183,7 @@ func (w *warmPool) claimWarmNamespace(ctx context.Context, externalID string) (s
 		if candidate.Annotations == nil {
 			candidate.Annotations = map[string]string{}
 		}
-		candidate.Labels["sbx.state"] = "claimed"
-		if externalID != "" {
-			candidate.Labels["sbx.external_id"] = externalID
-		}
+		candidate.Labels["sbx.allocated"] = "true"
 		candidate.Annotations["sbx.last_exec_at"] = strconv.FormatInt(time.Now().Unix(), 10)
 		_, err = w.client.CoreV1().Namespaces().Update(ctx, &candidate, metav1.UpdateOptions{})
 		if err != nil {
@@ -225,42 +197,28 @@ func (w *warmPool) claimWarmNamespace(ctx context.Context, externalID string) (s
 func (w *warmPool) ensureWarmNamespaces(ctx context.Context, image string) error {
 	desired := w.desiredSize()
 	readySelector := labels.SelectorFromSet(map[string]string{
-		"sbx.pool":  "warm",
-		"sbx.state": "ready",
+		"sbx.allocated": "false",
 	})
 	readyList, err := w.client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{LabelSelector: readySelector.String()})
 	if err == nil {
 		metricWarmPoolReady.Set(int64(len(readyList.Items)))
 	}
 	metricWarmPoolDesired.Set(int64(desired))
-	selector := labels.SelectorFromSet(map[string]string{"sbx.pool": "warm"})
+	selector := labels.SelectorFromSet(map[string]string{"sbx.allocated": "false"})
 	nsList, err := w.client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
 	if err != nil {
 		return err
-	}
-	for i := range nsList.Items {
-		ns := nsList.Items[i]
-		if ns.Labels["sbx.state"] != "creating" {
-			continue
-		}
-		ready, err := w.isPodReady(ctx, ns.Name, "sandbox")
-		if err != nil || !ready {
-			continue
-		}
-		ns.Labels["sbx.state"] = "ready"
-		_, _ = w.client.CoreV1().Namespaces().Update(ctx, &ns, metav1.UpdateOptions{})
 	}
 	if len(nsList.Items) >= desired {
 		return nil
 	}
 	for i := len(nsList.Items); i < desired; i++ {
-		name := fmt.Sprintf("sbx-warm-%d", i+1)
+		name := sandboxNamespace(generateID())
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: name,
 				Labels: map[string]string{
-					"sbx.pool":  "warm",
-					"sbx.state": "creating",
+					"sbx.allocated": "false",
 				},
 				Annotations: map[string]string{
 					"sbx.last_exec_at": "0",
@@ -299,8 +257,7 @@ func (w *warmPool) ensureWarmNamespaces(ctx context.Context, image string) error
 
 func (w *warmPool) reapIdle(ctx context.Context) error {
 	selector := labels.SelectorFromSet(map[string]string{
-		"sbx.pool":  "warm",
-		"sbx.state": "claimed",
+		"sbx.allocated": "true",
 	})
 	nsList, err := w.client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
 	if err != nil {

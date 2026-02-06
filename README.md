@@ -47,9 +47,13 @@ This repo contains a minimal control plane and CLI that create a sandbox Pod on 
    ```bash
    go run ./cli/cmd/sbx delete -id <ID_FROM_CREATE>
    ```
+8. List sandbox status:
+   ```bash
+   go run ./cli/cmd/sbx status
+   ```
 
 ## Configuration
-- `SANDBOX_IMAGE` (default: `ubuntu:22.04`)
+- `SANDBOX_IMAGE` (default: `sandbox-base:dev`)
 - `SANDBOX_VOLUME_MODE` (`emptydir` or `pvc`, default: `emptydir`)
 - `SANDBOX_CACHE_MODE` (`emptydir`, `hostpath`, or `pvc`, default: `emptydir`)
 - `SANDBOX_CACHE_HOSTPATH` (default: `/var/lib/sbx-cache`, only for `hostpath`)
@@ -60,21 +64,19 @@ This repo contains a minimal control plane and CLI that create a sandbox Pod on 
 - `SANDBOX_WARM_POOL_AUTOSIZE` (`1` to enable)
 - `SANDBOX_WARM_POOL_MIN` / `SANDBOX_WARM_POOL_MAX`
 - `SANDBOX_IDLE_TTL` (default: `15m`)
-- `SANDBOX_WARM_CONTROL_NAMESPACE` (default: `sbx-warm-control`)
 - `SANDBOX_CPU_REQUEST`, `SANDBOX_MEM_REQUEST`, `SANDBOX_CPU_LIMIT`, `SANDBOX_MEM_LIMIT`
 - `SANDBOX_ALLOWED_HOSTS` (comma-separated host allowlist applied to sandbox env/annotations)
 - `SANDBOX_DISALLOWED_HOSTS` (comma-separated host denylist applied to sandbox env/annotations)
 - `SANDBOX_ENV_*` (prefix to inject arbitrary env vars into sandbox, e.g. `SANDBOX_ENV_NPM_CONFIG_REGISTRY`)
 - `SANDBOX_CONFIG` (path to config file; YAML format)
-- `SANDBOX_STREAM_MODE` (`control-plane` or `sidecar`, default: `control-plane`)
-- `SANDBOX_STREAM_SIDECAR_IMAGE` (required when `sidecar` mode enabled)
+- `SANDBOX_STREAM_SIDECAR_IMAGE` (if empty, async execs will not stream output)
 - `SANDBOX_STREAM_ENDPOINT` (control plane URL for sidecar streaming)
 - `SANDBOX_STREAM_EVENTS_DIR` (default: `/sbx-events`)
 - `SANDBOX_STREAM_BUFFER` (in-memory events retained per sandbox, default: `200`)
-- `SANDBOX_USE_ASYNC_EXEC` (`1` to default exec to async; request can override)
+- `SANDBOX_ASYNC_EXEC` (`1` to default exec to async; request can override)
 
 ## Streaming Exec Output
-You can run async exec and stream output over WebSocket:
+Async exec output is streamed via the sidecar over WebSocket (requires `SANDBOX_STREAM_SIDECAR_IMAGE` and `SANDBOX_STREAM_ENDPOINT`):
 
 1. Start async exec:
    ```bash
@@ -90,8 +92,8 @@ You can run async exec and stream output over WebSocket:
 Events are JSON objects with fields:
 `sandbox_id`, `exec_id`, `seq`, `type` (`start`/`output`/`exit`), `stream` (`stdout`/`stderr`), `data`, `exit_code`, `time`.
 
-### Sidecar Mode
-Set `SANDBOX_STREAM_MODE=sidecar` and provide `SANDBOX_STREAM_SIDECAR_IMAGE`. The sandbox pod will include a streaming sidecar that tails `/sbx-events` and sends events to the control plane.
+### Sidecar Streaming
+Provide `SANDBOX_STREAM_SIDECAR_IMAGE`. If it is empty, async execs will still run but no output will be streamed. Sync execs return stdout/stderr directly and do not use streaming.
 
 Build the sidecar image:
 ```bash

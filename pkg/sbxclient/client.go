@@ -56,6 +56,14 @@ func (c *Client) Status(ctx context.Context, id string) (map[string]string, erro
 	return resp, nil
 }
 
+func (c *Client) ListSandboxes(ctx context.Context) ([]api.SandboxStatus, error) {
+	var resp []api.SandboxStatus
+	if err := c.do(ctx, http.MethodGet, "/sandboxes", nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
 func (c *Client) do(ctx context.Context, method, path string, reqBody any, out any) error {
 	var body io.Reader
 	if reqBody != nil {

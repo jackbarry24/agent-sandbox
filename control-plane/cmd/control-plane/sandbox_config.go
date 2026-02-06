@@ -23,7 +23,6 @@ type cacheConfig struct {
 }
 
 type streamConfig struct {
-	mode         string
 	sidecarImage string
 	endpoint     string
 	eventsDir    string
@@ -41,7 +40,6 @@ func cacheConfigFromEnv() cacheConfig {
 
 func streamConfigFromEnv() streamConfig {
 	return streamConfig{
-		mode:         getenv("SANDBOX_STREAM_MODE", "control-plane"),
 		sidecarImage: getenv("SANDBOX_STREAM_SIDECAR_IMAGE", ""),
 		endpoint:     getenv("SANDBOX_STREAM_ENDPOINT", ""),
 		eventsDir:    getenv("SANDBOX_STREAM_EVENTS_DIR", "/sbx-events"),
@@ -250,7 +248,7 @@ func sandboxPodSpec(image string, cmd []string, volumeMode, pvcName string, cach
 	mounts = append(mounts, corev1.VolumeMount{Name: "workspace", MountPath: "/workspace"})
 
 	streamCfg := streamConfigFromEnv()
-	if streamCfg.mode == "sidecar" {
+	if streamCfg.sidecarImage != "" {
 		vols = append(vols, corev1.Volume{
 			Name:         "sbx-events",
 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
@@ -268,7 +266,7 @@ func sandboxPodSpec(image string, cmd []string, volumeMode, pvcName string, cach
 			Env:          envVars,
 		},
 	}
-	if streamCfg.mode == "sidecar" && streamCfg.sidecarImage != "" {
+	if streamCfg.sidecarImage != "" {
 		sidecarEnv := []corev1.EnvVar{
 			{Name: "SBX_STREAM_ENDPOINT", Value: streamCfg.endpoint},
 			{Name: "SBX_EVENTS_DIR", Value: streamCfg.eventsDir},

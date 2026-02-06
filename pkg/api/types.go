@@ -22,7 +22,7 @@ type CreateSandboxResponse struct {
 
 type ExecRequest struct {
 	Command []string `json:"command"`
-	Async   bool     `json:"async"`
+	Async   *bool    `json:"async"`
 }
 
 type ExecResponse struct {
@@ -31,4 +31,13 @@ type ExecResponse struct {
 	ExecID   string `json:"exec_id,omitempty"`
 	Status   string `json:"status,omitempty"`
 	ExitCode int    `json:"exit_code,omitempty"`
+}
+
+type SandboxStatus struct {
+	ID           string `json:"id"`
+	Namespace    string `json:"namespace"`
+	Age          string `json:"age"`
+	State        string `json:"state"`
+	Allocated    string `json:"allocated"`
+	LastExecTime string `json:"last_exec_time"`
 }

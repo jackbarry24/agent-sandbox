@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"sandbox/pkg/api"
@@ -40,7 +41,7 @@ func main() {
 	fs.Var(&allowHosts, "allow-host", "allowed host (repeatable)")
 	fs.Var(&denyHosts, "deny-host", "disallowed host (repeatable)")
 	command := fs.String("cmd", "", "command to exec (space-separated)")
-	async := fs.Bool("async", false, "run exec asynchronously")
+	syncMode := fs.Bool("sync", false, "run exec synchronously (block until completion)")
 	stream := fs.Bool("stream", false, "stream exec output after starting")
 	streamRaw := fs.Bool("stream-raw", false, "stream only stdout/stderr (no JSON)")
 	fs.Parse(os.Args[2:])
@@ -79,7 +80,11 @@ func main() {
 		if len(args) == 0 {
 			fatal("-cmd is required")
 		}
-		req := api.ExecRequest{Command: args, Async: *async || *stream || *streamRaw}
+		async := !*syncMode
+		if *stream || *streamRaw {
+			async = true
+		}
+		req := api.ExecRequest{Command: args, Async: &async}
 		resp, err := client.Exec(ctx, *id, req)
 		fatalIf(err)
 		if resp.ExecID != "" {
@@ -95,7 +100,15 @@ func main() {
 		}
 	case "status":
 		if *id == "" {
-			fatal("-id is required")
+			resp, err := client.ListSandboxes(ctx)
+			fatalIf(err)
+			w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
+			fmt.Fprintln(w, "ID\tAGE\tSTATE\tALLOCATED\tLAST_EXEC_TIME")
+			for _, s := range resp {
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", s.ID, s.Age, s.State, s.Allocated, s.LastExecTime)
+			}
+			_ = w.Flush()
+			return
 		}
 		resp, err := client.Status(ctx, *id)
 		fatalIf(err)
@@ -128,9 +141,10 @@ func usage() {
 	fmt.Println("  -allow-host example.com (repeatable)")
 	fmt.Println("  -deny-host example.com (repeatable)")
 	fmt.Println("  -cmd 'bash -lc ls -la'")
-	fmt.Println("  -async (exec returns exec_id and streams via websocket)")
+	fmt.Println("  -sync (block until completion; disables streaming)")
 	fmt.Println("  -stream (starts async exec and connects to stream)")
 	fmt.Println("  -stream-raw (starts async exec and prints only stdout/stderr)")
+	fmt.Println("  status without -id lists all sandboxes")
 	fmt.Println("  exec supports args after --, e.g. sbx exec -id demo -- bash -lc 'uname -a'")
 }
 

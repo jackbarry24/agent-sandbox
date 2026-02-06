@@ -21,7 +21,6 @@ type Config struct {
 	WarmPoolMin          int               `yaml:"warm_pool_min"`
 	WarmPoolMax          int               `yaml:"warm_pool_max"`
 	IdleTTL              string            `yaml:"idle_ttl"`
-	WarmControlNamespace string            `yaml:"warm_control_namespace"`
 	CreateReadyTimeout   string            `yaml:"create_ready_timeout"`
 	CPURequest           string            `yaml:"cpu_request"`
 	MemRequest           string            `yaml:"mem_request"`
@@ -30,12 +29,11 @@ type Config struct {
 	AllowedHosts         []string          `yaml:"allowed_hosts"`
 	DisallowedHosts      []string          `yaml:"disallowed_hosts"`
 	Env                  map[string]string `yaml:"env"`
-	StreamMode           string            `yaml:"stream_mode"`
 	StreamSidecarImage   string            `yaml:"stream_sidecar_image"`
 	StreamEndpoint       string            `yaml:"stream_endpoint"`
 	StreamEventsDir      string            `yaml:"stream_events_dir"`
 	StreamBuffer         int               `yaml:"stream_buffer"`
-	UseAsyncExec         bool              `yaml:"use_async_exec"`
+	AsyncExec            *bool             `yaml:"async_exec"`
 }
 
 var (
@@ -105,10 +103,6 @@ func configString(key string) (string, bool) {
 		if cfg.IdleTTL != "" {
 			return cfg.IdleTTL, true
 		}
-	case "SANDBOX_WARM_CONTROL_NAMESPACE":
-		if cfg.WarmControlNamespace != "" {
-			return cfg.WarmControlNamespace, true
-		}
 	case "SANDBOX_CREATE_READY_TIMEOUT":
 		if cfg.CreateReadyTimeout != "" {
 			return cfg.CreateReadyTimeout, true
@@ -128,10 +122,6 @@ func configString(key string) (string, bool) {
 	case "SANDBOX_MEM_LIMIT":
 		if cfg.MemLimit != "" {
 			return cfg.MemLimit, true
-		}
-	case "SANDBOX_STREAM_MODE":
-		if cfg.StreamMode != "" {
-			return cfg.StreamMode, true
 		}
 	case "SANDBOX_STREAM_SIDECAR_IMAGE":
 		if cfg.StreamSidecarImage != "" {
@@ -171,9 +161,12 @@ func configInt(key string) (int, bool) {
 		if cfg.StreamBuffer != 0 {
 			return cfg.StreamBuffer, true
 		}
-	case "SANDBOX_USE_ASYNC_EXEC":
-		if cfg.UseAsyncExec {
-			return 1, true
+	case "SANDBOX_ASYNC_EXEC":
+		if cfg.AsyncExec != nil {
+			if *cfg.AsyncExec {
+				return 1, true
+			}
+			return 0, true
 		}
 	}
 	return 0, false
@@ -189,9 +182,9 @@ func configBool(key string) (bool, bool) {
 		if cfg.WarmPoolAutosize {
 			return true, true
 		}
-	case "SANDBOX_USE_ASYNC_EXEC":
-		if cfg.UseAsyncExec {
-			return true, true
+	case "SANDBOX_ASYNC_EXEC":
+		if cfg.AsyncExec != nil {
+			return *cfg.AsyncExec, true
 		}
 	}
 	return false, false
